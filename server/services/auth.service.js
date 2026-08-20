@@ -103,15 +103,17 @@ export async function register({ name, email, password, role, collegeId }) {
     passwordHash: password, // hashed by the pre-save hook
     role,
     collegeId: role === 'student' ? collegeId || null : null,
+    isEmailVerified: true, // ← AUTO VERIFY (OTP disabled)
   });
   await user.save();
 
-  await issueOtp(user, 'verify_email');
+  // OTP sending removed
 
   return user.toSafeJSON();
 }
 
 export async function verifyEmail({ email, otp, deviceInfo }) {
+  // Keep this function so old links don't break, but it's no longer required
   const user = await User.findOne({ email }).select('+otp +refreshTokens');
   if (!user) throw ApiError.notFound('No account found for this email.');
   if (user.isEmailVerified) throw ApiError.badRequest('This email is already verified.');
@@ -129,7 +131,6 @@ export async function verifyEmail({ email, otp, deviceInfo }) {
 export async function resendOtp({ email, purpose }) {
   const user = await User.findOne({ email }).select('+otp');
 
-  // Respond the same way whether or not the account exists, to avoid email enumeration.
   if (!user) return;
   if (purpose === 'verify_email' && user.isEmailVerified) return;
 
@@ -146,11 +147,7 @@ export async function login({ email, password, deviceInfo }) {
     throw ApiError.forbidden('This account has been disabled. Contact your administrator.');
   }
 
-  if (!user.isEmailVerified) {
-    throw new ApiError(403, 'Please verify your email before logging in.', [
-      { field: 'email', message: 'unverified' },
-    ]);
-  }
+  // ← OTP / email verification check REMOVED
 
   user.lastLoginAt = new Date();
   const tokens = await issueSession(user, deviceInfo);
@@ -180,7 +177,6 @@ export async function googleLogin({ idToken, role, deviceInfo }) {
     user = await User.findOne({ email: payload.email }).select('+refreshTokens');
 
     if (user) {
-      // Existing email/password account signing in with Google for the first time — link it.
       user.googleId = payload.sub;
     } else {
       const desiredRole = SELF_REGISTERABLE_ROLES.includes(role) ? role : 'student';
@@ -194,7 +190,7 @@ export async function googleLogin({ idToken, role, deviceInfo }) {
     }
   }
 
-  user.isEmailVerified = true; // Google has already verified this email
+  user.isEmailVerified = true;
   if (!user.avatarUrl && payload.picture) user.avatarUrl = payload.picture;
   user.lastLoginAt = new Date();
 
@@ -219,14 +215,11 @@ export async function refreshSession({ refreshToken, deviceInfo }) {
   const matchIndex = user.refreshTokens.findIndex((t) => t.tokenHash === incomingHash);
 
   if (matchIndex === -1) {
-    // This exact refresh token isn't on file — either it was already rotated (stolen/replayed)
-    // or the session was revoked. Fail safe: revoke every session for this user.
     user.refreshTokens = [];
     await user.save();
     throw ApiError.unauthorized('Session invalid. Please log in again.');
   }
 
-  // Rotate: remove the used token, issue a brand new pair.
   user.refreshTokens.splice(matchIndex, 1);
   await user.save();
 
@@ -241,7 +234,7 @@ export async function logout({ refreshToken }) {
   try {
     decoded = verifyRefreshToken(refreshToken);
   } catch {
-    return; // already invalid/expired — nothing to clean up
+    return;
   }
 
   const user = await User.findById(decoded.sub).select('+refreshTokens');
@@ -254,7 +247,7 @@ export async function logout({ refreshToken }) {
 
 export async function forgotPassword({ email }) {
   const user = await User.findOne({ email });
-  if (!user) return; // don't reveal whether the account exists
+  if (!user) return;
 
   await issueOtp(user, 'reset_password');
 }
@@ -265,9 +258,9 @@ export async function resetPassword({ email, otp, newPassword }) {
 
   await verifyOtpOrThrow(user, 'reset_password', otp);
 
-  user.passwordHash = newPassword; // re-hashed by the pre-save hook
+  user.passwordHash = newPassword;
   user.otp = null;
-  user.refreshTokens = []; // force re-login on every device after a password reset
+  user.refreshTokens = [];
   await user.save();
 }
 
